@@ -1,0 +1,19 @@
+spring:
+  application:
+    name: cashfree-payment-integration
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/cashfreeDB
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD}
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+cashfree:
+  client-id: ${CASHFREE_CLIENT_ID}
+  client-secret: ${CASHFREE_CLIENT_SECRET}
+  environment: SANDBOX
+  api-version: 2025-01-01
