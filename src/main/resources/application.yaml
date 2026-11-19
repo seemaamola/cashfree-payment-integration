@@ -2,12 +2,14 @@ spring:
   application:
     name: cashfree-payment-integration
 
+
   datasource:
     url: jdbc:postgresql://localhost:5432/cashfreeDB
     username: ${DB_USERNAME:postgres}
     password: ${DB_PASSWORD}
 
   jpa:
+    open-in-view: false
     hibernate:
       ddl-auto: update
     show-sql: true

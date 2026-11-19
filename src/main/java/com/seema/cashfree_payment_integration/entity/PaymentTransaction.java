@@ -30,4 +30,7 @@ public class PaymentTransaction {
     private String transactionStatus;
 
     private String paymentMethod;
+
+    @Column(unique = true)
+    private String cfPaymentId;  //Cashfree's own payment ID.
 }
