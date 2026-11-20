@@ -1,7 +1,5 @@
 package com.seema.cashfree_payment_integration.service;
 
-import com.cashfree.pg.Cashfree;
-import com.cashfree.pg.model.PaymentEntity;
 import com.seema.cashfree_payment_integration.dto.CreatePaymentRequest;
 import com.seema.cashfree_payment_integration.dto.CreatePaymentResponse;
 import com.seema.cashfree_payment_integration.entity.PaymentOrder;
@@ -10,19 +8,25 @@ import com.seema.cashfree_payment_integration.repository.PaymentOrderRepository;
 import com.seema.cashfree_payment_integration.repository.PaymentTransactionRepository;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
 import com.cashfree.pg.model.CreateOrderRequest;
 import com.cashfree.pg.model.CustomerDetails;
 import com.cashfree.pg.ApiResponse;
+import com.cashfree.pg.Cashfree;
+import com.cashfree.pg.model.PaymentEntity;
 import com.cashfree.pg.model.OrderEntity;
 import com.cashfree.pg.ApiException;
 import com.cashfree.pg.model.PaymentEntity.PaymentStatusEnum;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class PaymentService {
@@ -30,6 +34,7 @@ public class PaymentService {
     private final PaymentOrderRepository paymentOrderRepository;
     private final PaymentTransactionRepository paymentTransactionRepository;
     private final Cashfree cashfree;
+    private final PaymentStatusUpdater paymentStatusUpdater;
 
 
     public PaymentOrder saveOrder(PaymentOrder paymentOrder)
@@ -37,12 +42,63 @@ public class PaymentService {
         return paymentOrderRepository.save(paymentOrder);
     }
 
-    @Transactional
-    public CreatePaymentResponse createOrder(CreatePaymentRequest request)
+    public CreatePaymentResponse createOrder(CreatePaymentRequest request, UUID idempotencyKey)
     {
+
+        // Check whether this idempotency key was already used
+        PaymentOrder existingPaymentOrder = paymentOrderRepository
+                .findByIdempotencyKey(idempotencyKey)
+                .orElse(null);
+
+        if(existingPaymentOrder !=null )
+        {
+            // Make sure the same key isn't being reused for different payment details
+            boolean sameRequest=
+                    existingPaymentOrder.getOrderAmount().compareTo(request.orderAmount()) ==0
+                    && existingPaymentOrder.getOrderCurrency()
+                            .equalsIgnoreCase(request.orderCurrency())
+                    && Objects.equals(existingPaymentOrder.getCustomerId(),request.customerId())
+                    && Objects.equals(existingPaymentOrder.getCustomerPhone(),request.customerPhone())
+                    && Objects.equals(existingPaymentOrder.getCustomerEmail(), request.customerEmail());
+            if(!sameRequest){
+                throw new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Idempotency key was already used with different payment details.");
+            }
+
+            // Find the transaction created for the existing order
+            PaymentTransaction existingTransaction =
+                    paymentTransactionRepository
+                            .findFirstByPaymentOrder_OrderIdOrderByIdDesc(
+                                    existingPaymentOrder.getOrderId()
+                            )
+                            .orElse(null);
+
+            // A payment session must exist before we can return the previous response
+            if(existingTransaction ==null
+                    || existingTransaction.getPaymentSessionId()==null
+                    || existingTransaction.getPaymentSessionId().isBlank())
+            {
+                throw  new ResponseStatusException(
+                        HttpStatus.CONFLICT,
+                        "Existing order found, but its payment session is not available yet."
+                );
+            }
+
+            // Return the existing order instead of creating another one
+            return CreatePaymentResponse.builder()
+                    .orderId(existingPaymentOrder.getOrderId())
+                    .orderAmount(existingPaymentOrder.getOrderAmount())
+                    .orderStatus(existingPaymentOrder.getOrderStatus())
+                    .paymentSessionId(existingTransaction.getPaymentSessionId())
+                    .build();
+
+        }
+
         //Creating a payment order on our system
         PaymentOrder paymentOrder= PaymentOrder.builder()
                 .orderId(UUID.randomUUID().toString())
+                .idempotencyKey(idempotencyKey)
                 .orderAmount(request.orderAmount())
                 .orderCurrency(request.orderCurrency())
                 .customerId(request.customerId())
@@ -70,7 +126,7 @@ public class PaymentService {
                     cashfree.PGCreateOrder(
                             cashfreeRequest,
                             null,
-                            null,
+                            idempotencyKey,
                             null
                     );
 
@@ -138,17 +194,38 @@ public class PaymentService {
                         new RuntimeException("Payment order not found")
                 );
 
+        if ("PAID".equals(paymentOrder.getOrderStatus())) {
+            return;
+        }
+
         //Fetch payment attempts from Cashfree.
         List<PaymentEntity> payments =
                 fetchPaymentsFromCashfree(orderId);
 
+        if (payments == null || payments.isEmpty()) {
+            log.warn("No payment attempts returned by Cashfree for orderId={}", orderId);
+            return;
+        }
+
+        log.info("Cashfree returned {} payment attempts for orderId={}",
+                payments.size(), orderId);
+
+        payments.stream()
+                .filter(Objects::nonNull)
+                .forEach(payment ->
+                        log.info("Payment status received from Cashfree: {}",
+                                payment.getPaymentStatus())
+                );
+
         //Find a successful payment.
         Optional<PaymentEntity> successfulPaymentOptional = payments.stream()
+                .filter(Objects::nonNull)
                 .filter(payment ->
                         payment.getPaymentStatus()==PaymentStatusEnum.SUCCESS)
                 .findFirst();
         if(successfulPaymentOptional.isEmpty())
         {
+            log.warn("No successful payment found for orderId={}", orderId);
             return;
         }
         PaymentEntity successfulPayment = successfulPaymentOptional.get();
@@ -176,16 +253,12 @@ public class PaymentService {
             throw new RuntimeException("Cashfree payment ID is missing");
         }
 
-        PaymentTransaction paymentTransaction =
-                paymentTransactionRepository
-                        .findFirstByPaymentOrder_OrderIdOrderByIdDesc(orderId)
-                        .orElseThrow(()-> new RuntimeException("Payment transaction not found"));
+        paymentStatusUpdater.markPaymentSuccessful(
+                orderId,
+                successfulPayment.getCfPaymentId(),
+                successfulPayment.getPaymentGroup());
 
-        paymentTransaction.setCfPaymentId(
-                successfulPayment.getCfPaymentId());
-
-        paymentTransaction.setTransactionStatus("SUCCESS");
-
+        log.info("Payment successfully verified and updated for orderId={}", orderId);
     }
 
 }

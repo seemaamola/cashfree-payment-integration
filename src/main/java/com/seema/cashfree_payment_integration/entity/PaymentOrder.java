@@ -2,6 +2,7 @@ package com.seema.cashfree_payment_integration.entity;
 
 import jakarta.persistence.*;
 import java.math.BigDecimal;
+import java.util.UUID;
 
 import lombok.*;
 
@@ -35,4 +36,7 @@ public class PaymentOrder {
     private String customerPhone;
     private String customerEmail;
     private String orderStatus;
+
+    @Column(name = "idempotency_key", unique = true,updatable = false)
+    private UUID idempotencyKey;
 }
