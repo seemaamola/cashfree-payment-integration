@@ -3,6 +3,8 @@ package com.seema.cashfree_payment_integration.entity;
 import jakarta.persistence.*;
 import lombok.*;
 
+import java.math.BigDecimal;
+
 @Getter
 @Setter
 @Builder
@@ -22,6 +24,9 @@ public class PaymentTransaction {
     @ManyToOne(optional = false)
     @JoinColumn(name = "payment_order_id", nullable = false)
     private PaymentOrder paymentOrder;
+
+    @Column(nullable = false, precision = 12, scale = 2)
+    private BigDecimal paymentAmount;
 
     @Column(unique = true)
     private String paymentSessionId;

@@ -1,0 +1,64 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Cashfree Payment Checkout</title>
+
+    <script src="https://sdk.cashfree.com/js/v3/cashfree.js"></script>
+</head>
+<body>
+
+<h2>Cashfree Payment Integration</h2>
+
+<button id="payButton">Pay ₹1000</button>
+
+<p id="message"></p>
+
+<script>
+    const cashfree = Cashfree({
+        mode: "sandbox"
+    });
+
+    document.getElementById("payButton").addEventListener("click", async () => {
+        const message = document.getElementById("message");
+
+        try {
+            message.innerText = "Creating payment order...";
+
+            const response = await fetch("/api/payments", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    orderAmount: 1000.00,
+                    orderCurrency: "INR",
+                    customerId: "customer_001",
+                    customerPhone: "9876543210",
+                    customerEmail: "customer@example.com"
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error("Unable to create payment order");
+            }
+
+            const paymentData = await response.json();
+
+            message.innerText = "Opening Cashfree Checkout...";
+
+            await cashfree.checkout({
+                paymentSessionId: paymentData.paymentSessionId,
+                redirectTarget: "_self"
+            });
+
+        } catch (error) {
+            message.innerText = error.message;
+            console.error(error);
+        }
+    });
+</script>
+
+</body>
+</html>

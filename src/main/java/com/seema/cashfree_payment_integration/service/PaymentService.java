@@ -175,6 +175,7 @@ public class PaymentService {
                     .transactionId(UUID.randomUUID().toString())
                     .paymentOrder(savedPaymentOrder)
                     .paymentSessionId(paymentSessionId)
+                    .paymentAmount(paymentOrder.getOrderAmount())
                     .transactionStatus("PENDING")
                     .paymentMethod(null)
                     .build();
