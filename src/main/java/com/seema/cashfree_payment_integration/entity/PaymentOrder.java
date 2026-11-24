@@ -39,4 +39,5 @@ public class PaymentOrder {
 
     @Column(name = "idempotency_key", unique = true,updatable = false)
     private UUID idempotencyKey;
+
 }

@@ -9,6 +9,7 @@ import com.seema.cashfree_payment_integration.repository.PaymentTransactionRepos
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -42,6 +43,51 @@ public class PaymentService {
         return paymentOrderRepository.save(paymentOrder);
     }
 
+    private CreatePaymentResponse buildExistingPaymentResponse(
+            PaymentOrder existingOrder,
+            CreatePaymentRequest request) {
+
+        //compare Existing order with request order
+        boolean sameRequest =
+                        existingOrder.getOrderAmount().compareTo(request.orderAmount()) == 0
+                        && existingOrder.getOrderCurrency().equalsIgnoreCase(request.orderCurrency())
+                        && Objects.equals(existingOrder.getCustomerId(), request.customerId())
+                        && Objects.equals(existingOrder.getCustomerPhone(), request.customerPhone())
+                        && Objects.equals(existingOrder.getCustomerEmail(), request.customerEmail());
+
+        //If they are same then return 409 CONFLICT
+        if (!sameRequest) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Idempotency key was already used with different payment details.");
+        }
+
+        //Retrieve the existing transaction
+        //paymentSessionId is stored in PaymentTransaction, not directly in PaymentOrder.
+        PaymentTransaction existingTransaction =
+                paymentTransactionRepository
+                        .findFirstByPaymentOrder_OrderIdOrderByIdDesc(existingOrder.getOrderId())
+                        .orElse(null);
+
+        //handling of an order that hasn't finished processing
+        if (existingTransaction == null
+                || existingTransaction.getPaymentSessionId() == null
+                || existingTransaction.getPaymentSessionId().isBlank()) {
+
+            throw new ResponseStatusException(
+                    HttpStatus.CONFLICT,
+                    "Payment request is still being processed. Retry with the same key."
+            );
+        }
+
+        //retrieving existing information and returning it.
+        return CreatePaymentResponse.builder()
+                .orderId(existingOrder.getOrderId())
+                .orderAmount(existingOrder.getOrderAmount())
+                .orderStatus(existingOrder.getOrderStatus())
+                .paymentSessionId(existingTransaction.getPaymentSessionId())
+                .build();
+    }
+
     public CreatePaymentResponse createOrder(CreatePaymentRequest request, UUID idempotencyKey)
     {
 
@@ -50,50 +96,11 @@ public class PaymentService {
                 .findByIdempotencyKey(idempotencyKey)
                 .orElse(null);
 
-        if(existingPaymentOrder !=null )
-        {
-            // Make sure the same key isn't being reused for different payment details
-            boolean sameRequest=
-                    existingPaymentOrder.getOrderAmount().compareTo(request.orderAmount()) ==0
-                    && existingPaymentOrder.getOrderCurrency()
-                            .equalsIgnoreCase(request.orderCurrency())
-                    && Objects.equals(existingPaymentOrder.getCustomerId(),request.customerId())
-                    && Objects.equals(existingPaymentOrder.getCustomerPhone(),request.customerPhone())
-                    && Objects.equals(existingPaymentOrder.getCustomerEmail(), request.customerEmail());
-            if(!sameRequest){
-                throw new ResponseStatusException(
-                        HttpStatus.CONFLICT,
-                        "Idempotency key was already used with different payment details.");
-            }
-
-            // Find the transaction created for the existing order
-            PaymentTransaction existingTransaction =
-                    paymentTransactionRepository
-                            .findFirstByPaymentOrder_OrderIdOrderByIdDesc(
-                                    existingPaymentOrder.getOrderId()
-                            )
-                            .orElse(null);
-
-            // A payment session must exist before we can return the previous response
-            if(existingTransaction ==null
-                    || existingTransaction.getPaymentSessionId()==null
-                    || existingTransaction.getPaymentSessionId().isBlank())
-            {
-                throw  new ResponseStatusException(
-                        HttpStatus.CONFLICT,
-                        "Existing order found, but its payment session is not available yet."
-                );
-            }
-
-            // Return the existing order instead of creating another one
-            return CreatePaymentResponse.builder()
-                    .orderId(existingPaymentOrder.getOrderId())
-                    .orderAmount(existingPaymentOrder.getOrderAmount())
-                    .orderStatus(existingPaymentOrder.getOrderStatus())
-                    .paymentSessionId(existingTransaction.getPaymentSessionId())
-                    .build();
-
+        if (existingPaymentOrder != null) {
+            return buildExistingPaymentResponse(existingPaymentOrder, request);
         }
+
+
 
         //Creating a payment order on our system
         PaymentOrder paymentOrder= PaymentOrder.builder()
@@ -107,8 +114,27 @@ public class PaymentService {
                 .orderStatus("CREATED")
                 .build();
         //saving it
-        PaymentOrder savedPaymentOrder = paymentOrderRepository.save(paymentOrder);
+        //PaymentOrder savedPaymentOrder = paymentOrderRepository.save(paymentOrder);
+        PaymentOrder savedPaymentOrder;
 
+        try {
+            savedPaymentOrder =
+                    paymentOrderRepository.saveAndFlush(paymentOrder);
+
+        } catch (DataIntegrityViolationException exception) {
+
+            PaymentOrder concurrentlyCreatedOrder = paymentOrderRepository
+                    .findByIdempotencyKey(idempotencyKey)
+                    .orElseThrow(() -> exception);
+
+            return buildExistingPaymentResponse(
+                    concurrentlyCreatedOrder,
+                    request
+            );
+
+        }
+
+        //Cashfree requires customer information to create a payment order.
         CustomerDetails customerDetails = new CustomerDetails();
         customerDetails.setCustomerId(savedPaymentOrder.getCustomerId());
         customerDetails.setCustomerPhone(savedPaymentOrder.getCustomerPhone());
@@ -131,7 +157,17 @@ public class PaymentService {
                     );
 
             OrderEntity cashfreeOrder = cashfreeResponse.getData();
-            //setting payment session id returnd from cashfree
+            if (cashfreeOrder == null
+                    || cashfreeOrder.getPaymentSessionId() == null
+                    || cashfreeOrder.getPaymentSessionId().isBlank()) {
+
+                throw new IllegalStateException(
+                        "Cashfree returned an invalid payment session."
+                );
+            }
+
+
+            //setting payment session id returned from cashfree
             String paymentSessionId = cashfreeOrder.getPaymentSessionId();
 
 
@@ -193,7 +229,7 @@ public class PaymentService {
                 .orElseThrow(() ->
                         new RuntimeException("Payment order not found")
                 );
-
+        //Check wether the order is marked as PAID so that we dont repeat verification
         if ("PAID".equals(paymentOrder.getOrderStatus())) {
             return;
         }
